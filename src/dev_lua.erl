@@ -106,6 +106,10 @@ load_modules([ModuleID | Rest], Opts, Acc) when ?IS_ID(ModuleID) ->
                 <<"body">> => <<"Lua module '", ModuleID/binary, "' not found.">>
             }}
     end;
+load_modules([ModuleBin | Rest], Opts, Acc) when is_binary(ModuleBin) ->
+    % Inline Lua code string (not an Arweave ID due to guard order).
+    % This allows users to provide Lua code directly without uploading to Arweave.
+    load_modules(Rest, Opts, [{<<"inline">>, ModuleBin}|Acc]);
 load_modules([Module | Rest], Opts, Acc) when is_map(Module) ->
     % We have found a message with a Lua module inside. Search for the binary
     % of the program in the body and the data.
