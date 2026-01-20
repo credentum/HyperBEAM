@@ -91,9 +91,9 @@ process_found_module(Base, Module, Opts) when is_map(Module) ->
         CT when CT == <<"application/lua">> orelse CT == <<"text/x-lua">> ->
             find_modules_from_list(Base, [Module], Opts);
         _ ->
-            % If the script is not a literal Lua script, assume it is a
-            % map of scripts with content types, and recurse.
-            find_modules_from_list(Base, maps:values(Module), Opts)
+            % Module is wrapped in message format (has body/data keys).
+            % Pass to load_modules which knows how to extract the Lua code.
+            load_modules([Module], Opts)
     end;
 process_found_module(_Base, Modules, Opts) when is_list(Modules) ->
     % We have found a list of scripts, load them.
