@@ -69,15 +69,27 @@ ensure_initialized(Base, Req, Opts) ->
 %% Tries multiple locations: first the prefixed path (process/module when under
 %% dev_process), then the top-level module key, to support both legacy and
 %% new process structures.
-find_modules(Base, _Req, Opts) ->
+find_modules(Base, Req, Opts) ->
     ?event(debug_lua, {find_modules, starting}),
-    % Always try direct module lookup first - this is where WAO/hbsig puts it
-    case hb_ao:get(<<"module">>, {as, <<"message@1.0">>, Base}, Opts) of
+    % Get input prefix (e.g., "process" when running under dev_process)
+    InPrefix = dev_stack:input_prefix(Base, Req, Opts),
+    PrefixedPath = <<InPrefix/binary, "/module">>,
+    ?event(debug_lua, {find_modules, {trying_prefixed_path, PrefixedPath}}),
+    % Try prefixed path first (e.g., process/module), then fall back to module
+    case hb_ao:get(PrefixedPath, {as, <<"message@1.0">>, Base}, Opts) of
         not_found ->
-            ?event(debug_lua, {find_modules, module_not_found_at_top_level}),
-            {error, <<"no-modules-found">>};
+            ?event(debug_lua, {find_modules, prefixed_not_found_trying_top_level}),
+            % Fall back to top-level module key
+            case hb_ao:get(<<"module">>, {as, <<"message@1.0">>, Base}, Opts) of
+                not_found ->
+                    ?event(debug_lua, {find_modules, module_not_found}),
+                    {error, <<"no-modules-found">>};
+                Module ->
+                    ?event(debug_lua, {find_modules, {found_at_top_level, Module}}),
+                    process_found_module(Base, Module, Opts)
+            end;
         Module ->
-            ?event(debug_lua, {find_modules, {found_module, Module}}),
+            ?event(debug_lua, {find_modules, {found_at_prefixed_path, Module}}),
             process_found_module(Base, Module, Opts)
     end.
 
