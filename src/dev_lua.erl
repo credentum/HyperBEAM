@@ -66,28 +66,18 @@ ensure_initialized(Base, Req, Opts) ->
     end.
 
 %% @doc Find the script in the base message, either by ID or by string.
-%% Respects the `input-prefix` setting (e.g., when running under dev_process,
-%% looks for module at `process/module` instead of just `module`).
-find_modules(Base, Req, Opts) ->
-    InPrefix = dev_stack:input_prefix(Base, Req, Opts),
-    ModulePath = case InPrefix of
-        <<>> -> <<"module">>;
-        _ -> <<InPrefix/binary, "/module">>
-    end,
-    ?event(debug_lua, {find_modules, {input_prefix, InPrefix}, {module_path, ModulePath}}),
-    case hb_ao:get(ModulePath, {as, <<"message@1.0">>, Base}, Opts) of
+%% Tries multiple locations: first the prefixed path (process/module when under
+%% dev_process), then the top-level module key, to support both legacy and
+%% new process structures.
+find_modules(Base, _Req, Opts) ->
+    ?event(debug_lua, {find_modules, starting}),
+    % Always try direct module lookup first - this is where WAO/hbsig puts it
+    case hb_ao:get(<<"module">>, {as, <<"message@1.0">>, Base}, Opts) of
         not_found ->
-            % Fallback: try looking for module at top level if prefixed lookup failed
-            case InPrefix of
-                <<>> -> {error, <<"no-modules-found">>};
-                _ ->
-                    ?event(debug_lua, {fallback_to_direct_module_lookup}),
-                    case hb_ao:get(<<"module">>, {as, <<"message@1.0">>, Base}, Opts) of
-                        not_found -> {error, <<"no-modules-found">>};
-                        Module -> process_found_module(Base, Module, Opts)
-                    end
-            end;
+            ?event(debug_lua, {find_modules, module_not_found_at_top_level}),
+            {error, <<"no-modules-found">>};
         Module ->
+            ?event(debug_lua, {find_modules, {found_module, Module}}),
             process_found_module(Base, Module, Opts)
     end.
 
