@@ -144,24 +144,15 @@ load_modules([ModuleID | Rest], Opts, Acc) when ?IS_ID(ModuleID) ->
             % as if the module message had beeen given directly.
             load_modules([ModuleMsg|Rest], Opts, Acc);
         not_found ->
-            {error, #{
-                <<"status">> => 404,
-                <<"body">> => <<"Lua module '", ModuleID/binary, "' not found.">>
-            }}
+            % Not found in cache - might be inline Lua code that happens to be
+            % 32/42/43 bytes (matching ?IS_ID length check). Fall back to treating
+            % it as inline code rather than erroring.
+            ?event(debug_lua, {load_modules, {id_not_found_trying_inline, ModuleID}}),
+            load_modules_inline(ModuleID, Rest, Opts, Acc)
     end;
 load_modules([ModuleBin | Rest], Opts, Acc) when is_binary(ModuleBin) ->
     % Inline Lua code string (not an Arweave ID due to guard order).
-    % This allows users to provide Lua code directly without uploading to Arweave.
-    % Size limit prevents DoS attacks via large code strings.
-    case byte_size(ModuleBin) =< ?MAX_INLINE_LUA_SIZE of
-        true ->
-            load_modules(Rest, Opts, [{<<"inline">>, ModuleBin}|Acc]);
-        false ->
-            {error, #{
-                <<"status">> => 413,
-                <<"body">> => <<"Inline Lua code exceeds maximum size of 1MB.">>
-            }}
-    end;
+    load_modules_inline(ModuleBin, Rest, Opts, Acc);
 load_modules([Module | Rest], Opts, Acc) when is_map(Module) ->
     % We have found a message with a Lua module inside. Search for the binary
     % of the program in the body and the data.
@@ -201,6 +192,20 @@ load_modules([Module | Rest], Opts, Acc) when is_map(Module) ->
                 ),
             % Load the module into the Lua state.
             load_modules(Rest, Opts, [{Name, ModuleBin}|Acc])
+    end.
+
+%% @doc Load a binary as inline Lua code with size validation.
+%% This handles both direct inline code and ID-length binaries that weren't
+%% found in cache (which are likely inline code that happens to be 32/42/43 bytes).
+load_modules_inline(ModuleBin, Rest, Opts, Acc) ->
+    case byte_size(ModuleBin) =< ?MAX_INLINE_LUA_SIZE of
+        true ->
+            load_modules(Rest, Opts, [{<<"inline">>, ModuleBin}|Acc]);
+        false ->
+            {error, #{
+                <<"status">> => 413,
+                <<"body">> => <<"Inline Lua code exceeds maximum size of 1MB.">>
+            }}
     end.
 
 %% @doc Initialize a new Lua state with a given base message and module.
