@@ -42,7 +42,7 @@ info(Base) ->
                 ++ maps:keys(Base)
     }.
 
-%% @doc Initialize the device state, loading the script into memory if it is 
+%% @doc Initialize the device state, loading the script into memory if it is
 %% a reference.
 init(Base, Req, Opts) ->
     ensure_initialized(Base, Req, Opts).
@@ -50,14 +50,14 @@ init(Base, Req, Opts) ->
 %% @doc Initialize the Lua VM if it is not already initialized. Optionally takes
 %% the script as a  Binary string. If not provided, the module will be loaded
 %% from the base message.
-ensure_initialized(Base, _Req, Opts) ->
+ensure_initialized(Base, Req, Opts) ->
     case hb_private:from_message(Base) of
-        #{<<"state">> := _} -> 
+        #{<<"state">> := _} ->
             ?event(debug_lua, lua_state_already_initialized),
             {ok, Base};
         _ ->
             ?event(debug_lua, initializing_lua_state),
-            case find_modules(Base, Opts) of
+            case find_modules(Base, Req, Opts) of
                 {ok, Modules} ->
                     initialize(Base, Modules, Opts);
                 Error ->
@@ -66,27 +66,52 @@ ensure_initialized(Base, _Req, Opts) ->
     end.
 
 %% @doc Find the script in the base message, either by ID or by string.
-find_modules(Base, Opts) ->
-    case hb_ao:get(<<"module">>, {as, <<"message@1.0">>, Base}, Opts) of
+%% Respects the `input-prefix` setting (e.g., when running under dev_process,
+%% looks for module at `process/module` instead of just `module`).
+find_modules(Base, Req, Opts) ->
+    InPrefix = dev_stack:input_prefix(Base, Req, Opts),
+    ModulePath = case InPrefix of
+        <<>> -> <<"module">>;
+        _ -> <<InPrefix/binary, "/module">>
+    end,
+    ?event(debug_lua, {find_modules, {input_prefix, InPrefix}, {module_path, ModulePath}}),
+    case hb_ao:get(ModulePath, {as, <<"message@1.0">>, Base}, Opts) of
         not_found ->
-            {error, <<"no-modules-found">>};
-        Module when is_binary(Module) ->
-            find_modules(Base#{ <<"module">> => [Module] }, Opts);
-        Module when is_map(Module) ->
-            % If the module is a map, check its content type to see if it is 
-            % a literal Lua module, or a map of modules with content types.
-            case hb_ao:get(<<"content-type">>, Module, Opts) of
-                CT when CT == <<"application/lua">> orelse CT == <<"text/x-lua">> ->
-                    find_modules(Base#{ <<"module">> => [Module] }, Opts);
+            % Fallback: try looking for module at top level if prefixed lookup failed
+            case InPrefix of
+                <<>> -> {error, <<"no-modules-found">>};
                 _ ->
-                    % If the script is not a literal Lua script, assume it is a
-                    % map of scripts with content types, and recurse.
-                    find_modules(Base#{ <<"module">> => maps:values(Module) }, Opts)
+                    ?event(debug_lua, {fallback_to_direct_module_lookup}),
+                    case hb_ao:get(<<"module">>, {as, <<"message@1.0">>, Base}, Opts) of
+                        not_found -> {error, <<"no-modules-found">>};
+                        Module -> process_found_module(Base, Module, Opts)
+                    end
             end;
-        Modules when is_list(Modules) ->
-            % We have found a list of scripts, load them.
-            load_modules(Modules, Opts)
+        Module ->
+            process_found_module(Base, Module, Opts)
     end.
+
+%% @doc Process a found module, handling different formats (binary, map, list).
+process_found_module(Base, Module, Opts) when is_binary(Module) ->
+    find_modules_from_list(Base, [Module], Opts);
+process_found_module(Base, Module, Opts) when is_map(Module) ->
+    % If the module is a map, check its content type to see if it is
+    % a literal Lua module, or a map of modules with content types.
+    case hb_ao:get(<<"content-type">>, Module, Opts) of
+        CT when CT == <<"application/lua">> orelse CT == <<"text/x-lua">> ->
+            find_modules_from_list(Base, [Module], Opts);
+        _ ->
+            % If the script is not a literal Lua script, assume it is a
+            % map of scripts with content types, and recurse.
+            find_modules_from_list(Base, maps:values(Module), Opts)
+    end;
+process_found_module(_Base, Modules, Opts) when is_list(Modules) ->
+    % We have found a list of scripts, load them.
+    load_modules(Modules, Opts).
+
+%% @doc Helper to find modules from a list (updates Base and recurses).
+find_modules_from_list(_Base, Modules, Opts) ->
+    load_modules(Modules, Opts).
 
 %% @doc Load a list of modules for installation into the Lua VM.
 load_modules(Modules, Opts) -> load_modules(Modules, Opts, []).
