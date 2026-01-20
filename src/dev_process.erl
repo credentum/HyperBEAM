@@ -439,12 +439,11 @@ compute_slot(ProcID, State, RawInputMsg, InitReq, TargetSlot, Opts) ->
 prepare_next_slot(ProcID, State, RawReq, Opts) ->
     Slot = hb_util:int(hb_ao:get(<<"slot">>, RawReq, Opts)),
     ?event(compute, {next_slot, Slot}),
-    % If the input message does not have a path, set it to `compute'.
-    Req =
-        case hb_path:from_message(request, RawReq, Opts) of
-            undefined -> RawReq#{ <<"path">> => <<"compute">> };
-            _ -> RawReq
-        end,
+    % Always set the path to `compute' for execution. The assignment's path
+    % (e.g., `<<"self">>') is scheduler routing metadata, not the execution
+    % function. The actual function to call comes from the message's `function'
+    % tag, with `compute' as the default.
+    Req = RawReq#{ <<"path">> => <<"compute">> },
     ?event(compute, {input_msg, Req}),
     ?event(compute, {executing, {proc_id, ProcID}, {slot, Slot}}, Opts),
     % Unset the previous results.
