@@ -7,7 +7,10 @@
 -include("include/hb.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
-%%% The set of functions that will be sandboxed by default if `sandbox' is set 
+%%% Maximum size for inline Lua code (1MB). Prevents DoS via large code strings.
+-define(MAX_INLINE_LUA_SIZE, 1048576).
+
+%%% The set of functions that will be sandboxed by default if `sandbox' is set
 %%% to only `true'. Setting `sandbox' to a map allows the invoker to specify
 %%% which functions should be sandboxed and what to return instead. Providing
 %%% a list instead of a map will result in all functions being sandboxed and
@@ -42,7 +45,7 @@ info(Base) ->
                 ++ maps:keys(Base)
     }.
 
-%% @doc Initialize the device state, loading the script into memory if it is 
+%% @doc Initialize the device state, loading the script into memory if it is
 %% a reference.
 init(Base, Req, Opts) ->
     ensure_initialized(Base, Req, Opts).
@@ -50,14 +53,14 @@ init(Base, Req, Opts) ->
 %% @doc Initialize the Lua VM if it is not already initialized. Optionally takes
 %% the script as a  Binary string. If not provided, the module will be loaded
 %% from the base message.
-ensure_initialized(Base, _Req, Opts) ->
+ensure_initialized(Base, Req, Opts) ->
     case hb_private:from_message(Base) of
-        #{<<"state">> := _} -> 
+        #{<<"state">> := _} ->
             ?event(debug_lua, lua_state_already_initialized),
             {ok, Base};
         _ ->
             ?event(debug_lua, initializing_lua_state),
-            case find_modules(Base, Opts) of
+            case find_modules(Base, Req, Opts) of
                 {ok, Modules} ->
                     initialize(Base, Modules, Opts);
                 Error ->
@@ -66,27 +69,65 @@ ensure_initialized(Base, _Req, Opts) ->
     end.
 
 %% @doc Find the script in the base message, either by ID or by string.
-find_modules(Base, Opts) ->
+%% Tries multiple locations: first the prefixed path (process/module when under
+%% dev_process), then the top-level module key, to support both legacy and
+%% new process structures.
+find_modules(Base, Req, Opts) ->
+    ?event(debug_lua, {find_modules, starting}),
+    % Get input prefix (e.g., "process" when running under dev_process)
+    InPrefix = dev_stack:input_prefix(Base, Req, Opts),
+    ?event(debug_lua, {find_modules, {input_prefix, InPrefix}}),
+    case InPrefix of
+        <<>> ->
+            % Direct device call (no prefix) - only check top-level module
+            ?event(debug_lua, {find_modules, direct_call_checking_top_level}),
+            find_module_at_top_level(Base, Opts);
+        _ ->
+            % Running under process@1.0 or similar - try prefixed path first
+            PrefixedPath = <<InPrefix/binary, "/module">>,
+            ?event(debug_lua, {find_modules, {trying_prefixed_path, PrefixedPath}}),
+            case hb_ao:get(PrefixedPath, {as, <<"message@1.0">>, Base}, Opts) of
+                not_found ->
+                    ?event(debug_lua, {find_modules, prefixed_not_found_trying_top_level}),
+                    find_module_at_top_level(Base, Opts);
+                Module ->
+                    ?event(debug_lua, {find_modules, {found_at_prefixed_path, Module}}),
+                    process_found_module(Base, Module, Opts)
+            end
+    end.
+
+%% @doc Find module at top-level "module" key.
+find_module_at_top_level(Base, Opts) ->
     case hb_ao:get(<<"module">>, {as, <<"message@1.0">>, Base}, Opts) of
         not_found ->
+            ?event(debug_lua, {find_modules, module_not_found}),
             {error, <<"no-modules-found">>};
-        Module when is_binary(Module) ->
-            find_modules(Base#{ <<"module">> => [Module] }, Opts);
-        Module when is_map(Module) ->
-            % If the module is a map, check its content type to see if it is 
-            % a literal Lua module, or a map of modules with content types.
-            case hb_ao:get(<<"content-type">>, Module, Opts) of
-                CT when CT == <<"application/lua">> orelse CT == <<"text/x-lua">> ->
-                    find_modules(Base#{ <<"module">> => [Module] }, Opts);
-                _ ->
-                    % If the script is not a literal Lua script, assume it is a
-                    % map of scripts with content types, and recurse.
-                    find_modules(Base#{ <<"module">> => maps:values(Module) }, Opts)
-            end;
-        Modules when is_list(Modules) ->
-            % We have found a list of scripts, load them.
-            load_modules(Modules, Opts)
+        Module ->
+            ?event(debug_lua, {find_modules, {found_at_top_level, Module}}),
+            process_found_module(Base, Module, Opts)
     end.
+
+%% @doc Process a found module, handling different formats (binary, map, list).
+process_found_module(Base, Module, Opts) when is_binary(Module) ->
+    find_modules_from_list(Base, [Module], Opts);
+process_found_module(Base, Module, Opts) when is_map(Module) ->
+    % If the module is a map, check its content type to see if it is
+    % a literal Lua module, or a map of modules with content types.
+    case hb_ao:get(<<"content-type">>, Module, Opts) of
+        CT when CT == <<"application/lua">> orelse CT == <<"text/x-lua">> ->
+            find_modules_from_list(Base, [Module], Opts);
+        _ ->
+            % Module is wrapped in message format (has body/data keys).
+            % Pass to load_modules which knows how to extract the Lua code.
+            load_modules([Module], Opts)
+    end;
+process_found_module(_Base, Modules, Opts) when is_list(Modules) ->
+    % We have found a list of scripts, load them.
+    load_modules(Modules, Opts).
+
+%% @doc Helper to find modules from a list (updates Base and recurses).
+find_modules_from_list(_Base, Modules, Opts) ->
+    load_modules(Modules, Opts).
 
 %% @doc Load a list of modules for installation into the Lua VM.
 load_modules(Modules, Opts) -> load_modules(Modules, Opts, []).
@@ -103,11 +144,15 @@ load_modules([ModuleID | Rest], Opts, Acc) when ?IS_ID(ModuleID) ->
             % as if the module message had beeen given directly.
             load_modules([ModuleMsg|Rest], Opts, Acc);
         not_found ->
-            {error, #{
-                <<"status">> => 404,
-                <<"body">> => <<"Lua module '", ModuleID/binary, "' not found.">>
-            }}
+            % Not found in cache - might be inline Lua code that happens to be
+            % 32/42/43 bytes (matching ?IS_ID length check). Fall back to treating
+            % it as inline code rather than erroring.
+            ?event(debug_lua, {load_modules, {id_not_found_trying_inline, ModuleID}}),
+            load_modules_inline(ModuleID, Rest, Opts, Acc)
     end;
+load_modules([ModuleBin | Rest], Opts, Acc) when is_binary(ModuleBin) ->
+    % Inline Lua code string (not an Arweave ID due to guard order).
+    load_modules_inline(ModuleBin, Rest, Opts, Acc);
 load_modules([Module | Rest], Opts, Acc) when is_map(Module) ->
     % We have found a message with a Lua module inside. Search for the binary
     % of the program in the body and the data.
@@ -147,6 +192,20 @@ load_modules([Module | Rest], Opts, Acc) when is_map(Module) ->
                 ),
             % Load the module into the Lua state.
             load_modules(Rest, Opts, [{Name, ModuleBin}|Acc])
+    end.
+
+%% @doc Load a binary as inline Lua code with size validation.
+%% This handles both direct inline code and ID-length binaries that weren't
+%% found in cache (which are likely inline code that happens to be 32/42/43 bytes).
+load_modules_inline(ModuleBin, Rest, Opts, Acc) ->
+    case byte_size(ModuleBin) =< ?MAX_INLINE_LUA_SIZE of
+        true ->
+            load_modules(Rest, Opts, [{<<"inline">>, ModuleBin}|Acc]);
+        false ->
+            {error, #{
+                <<"status">> => 413,
+                <<"body">> => <<"Inline Lua code exceeds maximum size of 1MB.">>
+            }}
     end.
 
 %% @doc Initialize a new Lua state with a given base message and module.
