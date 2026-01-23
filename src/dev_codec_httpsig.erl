@@ -520,9 +520,8 @@ signature_params_line(RawCommitment, Opts) ->
                                     <<"tag">>,
                                     <<"bundle">>
                                 ],
-                                %% FIX: Fall back to alg if type is not present
+                                %% FIX: Fall back to alg when type is not present
                                 %% hbsig client sends alg,keyid but not type
-                                %% See: forge/docs/issues/HBSIG_TYPE_MISMATCH.md
                                 Commitment#{ <<"alg">> => maps:get(<<"type">>, Commitment,
                                     maps:get(<<"alg">>, Commitment, <<"rsa-pss-sha512">>)) }
                             )
