@@ -248,26 +248,9 @@ default_message() ->
             vmm_type, guest_features
         ],
         routes => [
-            #{
-                % Routes for the genesis-wasm device to use a local CU, if requested.
-                <<"template">> => <<"/result/.*">>,
-                <<"node">> => #{ <<"prefix">> => <<"http://localhost:6363">> }
-            },
-            #{
-                % Routes for the genesis-wasm device to use a local CU, if requested.
-                <<"template">> => <<"/snapshot/.*">>,
-                <<"node">> => #{ <<"prefix">> => <<"http://localhost:6363">> }
-            },
-            #{
-                % Routes for the genesis-wasm device to use a local CU, if requested.
-                <<"template">> => <<"/dry-run.*">>,
-                <<"node">> => #{ <<"prefix">> => <<"http://localhost:6363">> }
-            },
-            #{
-                % Routes for the genesis-wasm device to use a local CU, if requested.
-                <<"template">> => <<"/state.*">>,
-                <<"node">> => #{ <<"prefix">> => <<"http://localhost:6363">> }
-            },
+            % NOTE: Removed localhost:6363 routes for genesis-wasm CU.
+            % These were development-only and caused connection refused errors
+            % when no local CU was running. Forge uses lua@5.3a, not genesis-wasm.
             #{
                 % Routes for GraphQL requests to use a remote GraphQL API.
                 <<"template">> => <<"/graphql">>,
