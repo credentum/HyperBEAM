@@ -76,7 +76,16 @@ normalize(Msg, Mode, Opts) when is_map(Msg) ->
                             offload ->
                                 % Write the child to the store to ensure its
                                 % storage and availability.
-                                hb_cache:write(NormChild, Opts)
+                                % IMPORTANT: Strip commitments from nested maps before
+                                % writing. Nested content maps inherit stale commitments
+                                % from their parent context, which would cause
+                                % with_only_committed to filter out new entries.
+                                ChildWithoutCommitments =
+                                    case is_map(NormChild) of
+                                        true -> maps:without([<<"commitments">>], NormChild);
+                                        false -> NormChild
+                                    end,
+                                hb_cache:write(ChildWithoutCommitments, Opts)
                         end,
                         ?event(debug_linkify, {generated_link, {key, Key}, {id, ID}}),
                         {<<NormKey/binary, "+link">>, ID};
