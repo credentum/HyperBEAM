@@ -62,29 +62,36 @@ normalize(Msg, Mode, Opts) when is_map(Msg) ->
                         % The value is a submessage that we have in local memory.
                         % We must offload it such that it is cached, and
                         % referenced by a link.
-                        % We start by normalizing the child message, generating 
+                        % We start by normalizing the child message, generating
                         % its IDs by proxy.
                         NormChild = normalize(V, Mode, Opts),
                         NormKey = hb_util:bin(Key),
-                        % Generate the ID of the normalized child message.
-                        ID = hb_message:id(NormChild, all, Opts),
+                        % IMPORTANT: Strip commitments from nested maps before
+                        % computing ID and writing. Nested content maps inherit stale
+                        % commitments from their parent context, which would cause
+                        % with_only_committed to filter out new entries.
+                        ChildWithoutCommitments =
+                            case is_map(NormChild) of
+                                true -> maps:without([<<"commitments">>], NormChild);
+                                false -> NormChild
+                            end,
+                        % Generate the ID of the child message WITHOUT commitments.
+                        % CRITICAL: Use 'none' committers and 'linkify_mode => discard'
+                        % to match how hb_cache:write computes the storage ID.
+                        % Using 'all' with a commitments key (even empty) can produce
+                        % a different ID than 'none' without the key, causing body
+                        % link resolution failures.
+                        ID = hb_message:id(
+                            ChildWithoutCommitments,
+                            none,
+                            Opts#{ linkify_mode => discard }
+                        ),
                         % If we are in `offload' mode, we write the message to the
-                        % cache. If we are in `discard' mode, we simply drop the 
+                        % cache. If we are in `discard' mode, we simply drop the
                         % nested message.
                         case Mode of
                             discard -> do_nothing;
                             offload ->
-                                % Write the child to the store to ensure its
-                                % storage and availability.
-                                % IMPORTANT: Strip commitments from nested maps before
-                                % writing. Nested content maps inherit stale commitments
-                                % from their parent context, which would cause
-                                % with_only_committed to filter out new entries.
-                                ChildWithoutCommitments =
-                                    case is_map(NormChild) of
-                                        true -> maps:without([<<"commitments">>], NormChild);
-                                        false -> NormChild
-                                    end,
                                 hb_cache:write(ChildWithoutCommitments, Opts)
                         end,
                         ?event(debug_linkify, {generated_link, {key, Key}, {id, ID}}),
