@@ -253,9 +253,16 @@ default_message() ->
             % when no local CU was running. Forge uses lua@5.3a, not genesis-wasm.
             #{
                 % Routes for GraphQL requests to use a remote GraphQL API.
+                % IRYS FIRST: For searching Irys-uploaded data items
+                % GOLDSKY/ARWEAVE FALLBACK: For broader search coverage
                 <<"template">> => <<"/graphql">>,
                 <<"nodes">> =>
                     [
+                        #{
+                            % Irys GraphQL - for searching Irys-uploaded data
+                            <<"prefix">> => <<"https://gateway.irys.xyz">>,
+                            <<"opts">> => #{ http_client => httpc, protocol => http2 }
+                        },
                         #{
                             <<"prefix">> => <<"https://ao-search-gateway.goldsky.com">>,
                             <<"opts">> => #{ http_client => httpc, protocol => http2 }
@@ -282,12 +289,22 @@ default_message() ->
             },
             #{
                 % Routes for raw data requests to use a remote gateway.
+                % IRYS FIRST: Instant availability after upload via @irys/sdk
+                % ARWEAVE FALLBACK: For older data or if Irys unavailable
                 <<"template">> => <<"/raw">>,
-                <<"node">> =>
-                    #{
-                        <<"prefix">> => <<"https://arweave.net">>,
-                        <<"opts">> => #{ http_client => gun, protocol => http2 }
-                    }
+                <<"nodes">> =>
+                    [
+                        #{
+                            % Irys gateway - instant availability after Irys upload
+                            <<"prefix">> => <<"https://gateway.irys.xyz">>,
+                            <<"opts">> => #{ http_client => httpc, protocol => http2 }
+                        },
+                        #{
+                            % Arweave.net fallback - works for all L1 confirmed TXs
+                            <<"prefix">> => <<"https://arweave.net">>,
+                            <<"opts">> => #{ http_client => gun, protocol => http2 }
+                        }
+                    ]
             }
         ],
         store =>
