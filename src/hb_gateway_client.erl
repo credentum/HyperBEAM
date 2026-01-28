@@ -9,33 +9,43 @@
 -module(hb_gateway_client).
 %% Raw access primitives:
 -export([query/2, query/3, query/4, query/5]).
--export([read/2, read_via_graphql/2, data/2, try_raw_fetch/2, result_to_message/2, item_spec/0]).
+-export([read/2, read_via_graphql/2, data/2, try_irys_fetch/2, try_raw_fetch/2, result_to_message/2, item_spec/0]).
 %% Application-specific data access functions:
 -export([scheduler_location/2]).
 -include_lib("include/hb.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
 %% @doc Get a data item (including data and tags) by its ID.
-%% Strategy: Try raw fetch first (works for Irys uploads immediately), then
-%% fall back to GraphQL for L1-confirmed transactions that need metadata.
+%% Strategy:
+%%   1. Try Irys direct fetch (/{id} path) - works immediately for Irys uploads
+%%   2. Try Arweave raw fetch (/raw/{id} path) - works for L1-confirmed TXs
+%%   3. Fall back to GraphQL for transactions with metadata requirements
 %%
-%% Raw-first approach enables immediate loading of modules uploaded to Irys
-%% without waiting for GraphQL indexing (which Irys doesn't support anyway).
+%% This enables immediate loading of modules uploaded to Irys without waiting
+%% for GraphQL indexing (which Irys doesn't support anyway).
 read(ID, Opts) ->
     % For subindex queries, we must use GraphQL (metadata-dependent)
     case maps:is_key(<<"subindex">>, Opts) of
         true ->
             read_via_graphql(ID, Opts);
         false ->
-            % Try raw fetch first (works immediately for Irys uploads)
-            case try_raw_fetch(ID, Opts) of
+            % Try Irys direct fetch first (uses /{id} path, not /raw/{id})
+            case try_irys_fetch(ID, Opts) of
                 {ok, Data} ->
-                    ?event({read_from_raw, {id, ID}, {size, byte_size(Data)}}),
+                    ?event({read_from_irys, {id, ID}, {size, byte_size(Data)}}),
                     build_message_from_raw(ID, Data, Opts);
-                {error, _RawError} ->
-                    % Raw failed, fall back to GraphQL (for L1-confirmed TXs)
-                    ?event({raw_fetch_failed, {id, ID}, trying_graphql}),
-                    read_via_graphql(ID, Opts)
+                {error, _IrysError} ->
+                    % Irys failed, try Arweave raw fetch
+                    ?event({irys_fetch_failed, {id, ID}, trying_arweave_raw}),
+                    case try_raw_fetch(ID, Opts) of
+                        {ok, Data} ->
+                            ?event({read_from_raw, {id, ID}, {size, byte_size(Data)}}),
+                            build_message_from_raw(ID, Data, Opts);
+                        {error, _RawError} ->
+                            % Raw failed, fall back to GraphQL (for L1-confirmed TXs)
+                            ?event({raw_fetch_failed, {id, ID}, trying_graphql}),
+                            read_via_graphql(ID, Opts)
+                    end
             end
     end.
 
@@ -147,9 +157,36 @@ data(ID, Opts) ->
             {error, no_viable_gateway}
     end.
 
-%% @doc Try to fetch raw data directly (bypasses GraphQL).
-%% Works for Irys uploads that aren't indexed by GraphQL services.
-%% Tries Irys gateway first (configured in routes), falls back to arweave.net.
+%% @doc Try to fetch data from Irys nodes directly.
+%% Irys uses /{id} path (NOT /raw/{id} like Arweave gateways).
+%% Tries node2.irys.xyz first, then node1.irys.xyz.
+try_irys_fetch(ID, Opts) ->
+    % Build request for Irys path format (/{id} not /raw/{id})
+    Req = #{
+        <<"multirequest-accept-status">> => 200,
+        <<"multirequest-responses">> => 1,
+        <<"path">> => <<"/", ID/binary>>,
+        <<"method">> => <<"GET">>
+    },
+    % Use the Irys-specific route (empty template, node2/node1 nodes)
+    case hb_http:request(Req, Opts) of
+        {ok, Res} ->
+            Body = hb_ao:get(<<"body">>, Res, <<>>, Opts),
+            case byte_size(Body) of
+                0 ->
+                    ?event({try_irys_fetch_empty, {id, ID}}),
+                    {error, empty_response};
+                Size ->
+                    ?event({try_irys_fetch_success, {id, ID}, {size, Size}}),
+                    {ok, Body}
+            end;
+        _Error ->
+            ?event({try_irys_fetch_failed, {id, ID}}),
+            {error, no_viable_gateway}
+    end.
+
+%% @doc Try to fetch raw data from Arweave gateway (uses /raw/{id} path).
+%% Works for L1-confirmed transactions on arweave.net.
 try_raw_fetch(ID, Opts) ->
     Req = #{
         <<"multirequest-accept-status">> => 200,

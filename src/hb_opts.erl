@@ -289,20 +289,32 @@ default_message() ->
             },
             #{
                 % Routes for raw data requests to use a remote gateway.
-                % IRYS FIRST: Instant availability after upload via @irys/sdk
-                % ARWEAVE FALLBACK: For older data or if Irys unavailable
+                % ARWEAVE: Uses /raw/{id} pattern (standard Arweave gateway path)
                 <<"template">> => <<"/raw">>,
                 <<"nodes">> =>
                     [
                         #{
-                            % Irys gateway - instant availability after Irys upload
-                            <<"prefix">> => <<"https://gateway.irys.xyz">>,
+                            % Arweave.net - works for all L1 confirmed TXs
+                            <<"prefix">> => <<"https://arweave.net">>,
+                            <<"opts">> => #{ http_client => gun, protocol => http2 }
+                        }
+                    ]
+            },
+            #{
+                % Routes for Irys direct access (Irys uses /{id} not /raw/{id}).
+                % Used by try_irys_fetch in hb_gateway_client for Irys uploads.
+                <<"template">> => <<"">>,
+                <<"nodes">> =>
+                    [
+                        #{
+                            % Irys node2 - direct access, no redirect
+                            <<"prefix">> => <<"https://node2.irys.xyz">>,
                             <<"opts">> => #{ http_client => httpc, protocol => http2 }
                         },
                         #{
-                            % Arweave.net fallback - works for all L1 confirmed TXs
-                            <<"prefix">> => <<"https://arweave.net">>,
-                            <<"opts">> => #{ http_client => gun, protocol => http2 }
+                            % Irys node1 fallback
+                            <<"prefix">> => <<"https://node1.irys.xyz">>,
+                            <<"opts">> => #{ http_client => httpc, protocol => http2 }
                         }
                     ]
             }
