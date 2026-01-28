@@ -303,7 +303,8 @@ default_message() ->
             #{
                 % Routes for Irys direct access (Irys uses /{id} not /raw/{id}).
                 % Used by try_irys_fetch in hb_gateway_client for Irys uploads.
-                <<"template">> => <<"">>,
+                % IMPORTANT: Use regex ^/ to match any path (empty string doesn't work)
+                <<"template">> => <<"^/">>,
                 <<"nodes">> =>
                     [
                         #{
