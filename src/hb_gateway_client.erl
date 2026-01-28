@@ -9,14 +9,38 @@
 -module(hb_gateway_client).
 %% Raw access primitives:
 -export([query/2, query/3, query/4, query/5]).
--export([read/2, data/2, result_to_message/2, item_spec/0]).
+-export([read/2, read_via_graphql/2, data/2, try_raw_fetch/2, result_to_message/2, item_spec/0]).
 %% Application-specific data access functions:
 -export([scheduler_location/2]).
 -include_lib("include/hb.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
-%% @doc Get a data item (including data and tags) by its ID, using the node's
-%% GraphQL peers.
+%% @doc Get a data item (including data and tags) by its ID.
+%% Strategy: Try raw fetch first (works for Irys uploads immediately), then
+%% fall back to GraphQL for L1-confirmed transactions that need metadata.
+%%
+%% Raw-first approach enables immediate loading of modules uploaded to Irys
+%% without waiting for GraphQL indexing (which Irys doesn't support anyway).
+read(ID, Opts) ->
+    % For subindex queries, we must use GraphQL (metadata-dependent)
+    case maps:is_key(<<"subindex">>, Opts) of
+        true ->
+            read_via_graphql(ID, Opts);
+        false ->
+            % Try raw fetch first (works immediately for Irys uploads)
+            case try_raw_fetch(ID, Opts) of
+                {ok, Data} ->
+                    ?event({read_from_raw, {id, ID}, {size, byte_size(Data)}}),
+                    build_message_from_raw(ID, Data, Opts);
+                {error, _RawError} ->
+                    % Raw failed, fall back to GraphQL (for L1-confirmed TXs)
+                    ?event({raw_fetch_failed, {id, ID}, trying_graphql}),
+                    read_via_graphql(ID, Opts)
+            end
+    end.
+
+%% @doc Get a data item using the GraphQL API.
+%% This is the traditional method that requires transactions to be indexed.
 %% It uses the following GraphQL schema:
 %% type Transaction {
 %%   id: ID!
@@ -33,9 +57,9 @@
 %%   winston: String!
 %%   ar: String!
 %% }
-read(ID, Opts) ->
+read_via_graphql(ID, Opts) ->
     {Query, Variables} = case maps:is_key(<<"subindex">>, Opts) of
-      true -> 
+      true ->
         Tags = subindex_to_tags(maps:get(<<"subindex">>, Opts)),
         {
             <<
@@ -51,7 +75,7 @@ read(ID, Opts) ->
                 <<"transactionIds">> => [hb_util:human_id(ID)]
             }
         };
-      false -> 
+      false ->
         {
             <<
                 "query($transactionIds: [ID!]!) { ",
@@ -122,6 +146,43 @@ data(ID, Opts) ->
             ?event(gateway, {request_error, {id, ID}, {response, Res}}),
             {error, no_viable_gateway}
     end.
+
+%% @doc Try to fetch raw data directly (bypasses GraphQL).
+%% Works for Irys uploads that aren't indexed by GraphQL services.
+%% Tries Irys gateway first (configured in routes), falls back to arweave.net.
+try_raw_fetch(ID, Opts) ->
+    Req = #{
+        <<"multirequest-accept-status">> => 200,
+        <<"multirequest-responses">> => 1,
+        <<"path">> => <<"/raw/", ID/binary>>,
+        <<"method">> => <<"GET">>
+    },
+    case hb_http:request(Req, Opts) of
+        {ok, Res} ->
+            Body = hb_ao:get(<<"body">>, Res, <<>>, Opts),
+            case byte_size(Body) of
+                0 ->
+                    ?event({try_raw_fetch_empty, {id, ID}}),
+                    {error, empty_response};
+                Size ->
+                    ?event({try_raw_fetch_success, {id, ID}, {size, Size}}),
+                    {ok, Body}
+            end;
+        _Error ->
+            ?event({try_raw_fetch_failed, {id, ID}}),
+            {error, no_viable_gateway}
+    end.
+
+%% @doc Build minimal message from raw data (no GraphQL metadata).
+%% Sufficient for module loading which only needs the data bytes.
+%% Marks message with source => raw-fetch for traceability.
+build_message_from_raw(ID, Data, _Opts) ->
+    ?event({build_message_from_raw, {id, ID}, {size, byte_size(Data)}}),
+    {ok, #{
+        <<"id">> => ID,
+        <<"data">> => Data,
+        <<"source">> => <<"raw-fetch">>
+    }}.
 
 %% @doc Find the location of the scheduler based on its ID, through GraphQL.
 scheduler_location(Address, Opts) ->
