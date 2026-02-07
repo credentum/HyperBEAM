@@ -155,7 +155,12 @@ do_push(PrimaryProcess, Assignment, Opts) ->
                 end
             }
         }),
-    case {Status, hb_ao:get(<<"outbox">>, Result, #{}, Opts)} of
+    %% Get outbox, with fallback to 'messages' for Lua native processes.
+    %% AOS uses 'outbox', but native Lua (lua@5.3a) processes commonly use
+    %% 'messages' in p.results.messages for IPC. Supporting both conventions
+    %% ensures message forwarding works across all process types.
+    Outbox = get_outbox_or_messages(Result, Opts),
+    case {Status, Outbox} of
         {ok, NoResults} when ?IS_EMPTY_MESSAGE(NoResults) ->
             ?event(push_short, {done, {process, {string, ID}}, {slot, Slot}}),
             {ok, AdditionalRes#{ <<"slot">> => Slot, <<"process">> => ID }};
@@ -487,6 +492,23 @@ calculate_base_id(GivenProcess, Opts) ->
         ),
     ?event(debug_base, {push_generated_base, {id, BaseID}, {base, BaseProcess}}),
     BaseID.
+
+%% @doc Get outbound messages from result, checking both 'outbox' (AOS convention)
+%% and 'messages' (Lua native convention). This supports IPC for both AOS-based
+%% processes and native Lua processes (lua@5.3a device).
+%%
+%% Background: AOS processes use ao.send() which populates ao.outbox, resulting
+%% in results/outbox. Native Lua processes commonly use p.results.messages for
+%% IPC. By checking both locations, the push device works correctly regardless
+%% of which convention the process uses.
+get_outbox_or_messages(Result, Opts) ->
+    case hb_ao:get(<<"outbox">>, Result, #{}, Opts) of
+        NotFound when ?IS_EMPTY_MESSAGE(NotFound) ->
+            %% Fallback: Check for 'messages' (Lua native convention)
+            hb_ao:get(<<"messages">>, Result, #{}, Opts);
+        Found ->
+            Found
+    end.
 
 %% @doc Add the necessary keys to the message to be scheduled, then schedule it.
 %% If the remote scheduler does not support the given codec, it will be

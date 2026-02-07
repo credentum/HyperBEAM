@@ -69,13 +69,18 @@ build(_, _, _NodeMsg) ->
 handle(NodeMsg, RawRequest) ->
     ?event({singleton_tabm_request, RawRequest}),
     NormRequest = hb_singleton:from(RawRequest, NodeMsg),
+    % NOTE: Use try-catch for logging to avoid crashing on unresolvable body links.
+    % This can happen when multipart messages have body parts that become links
+    % that cannot be resolved from cache.
     ?event(
         http,
         {request,
-            hb_cache:ensure_all_loaded(
+            try hb_cache:ensure_all_loaded(
                 hb_ao:normalize_keys(NormRequest, NodeMsg),
                 NodeMsg
             )
+            catch _:_ -> {unresolved_links_in_request, NormRequest}
+            end
         }
     ),
     case hb_opts:get(initialized, false, NodeMsg) of
